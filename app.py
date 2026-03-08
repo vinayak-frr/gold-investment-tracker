@@ -2,98 +2,113 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 from datetime import datetime
-import plotly.graph_objects as go
+import plotly.express as px
 
-# 1. PAGE SETUP
-st.set_page_config(page_title="Gold Battery Master", layout="wide", page_icon="📀")
+# 1. PAGE CONFIG
+st.set_page_config(page_title="Gold Battery Tracker", layout="wide", page_icon="📀")
 
+# Custom Styling for the Big Revenue Box
 st.markdown("""
     <style>
     .revenue-box {
-        background-color: #1a1a1a; border: 3px solid #FFD700; border-radius: 20px;
-        padding: 40px; text-align: center; margin-bottom: 30px;
+        background-color: #1a1a1a;
+        border: 3px solid #FFD700;
+        border-radius: 20px;
+        padding: 40px;
+        text-align: center;
+        margin-bottom: 30px;
+        box-shadow: 0px 0px 20px rgba(255, 215, 0, 0.2);
     }
-    .revenue-text { color: #FFD700; font-size: 60px; font-weight: bold; }
-    .revenue-label { color: #FFFFFF; font-size: 22px; }
+    .revenue-text {
+        color: #FFD700;
+        font-size: 60px;
+        font-weight: bold;
+    }
+    .revenue-label {
+        color: #FFFFFF;
+        font-size: 22px;
+        letter-spacing: 2px;
+    }
     </style>
     """, unsafe_allow_html=True)
 
-# 2. THE ERROR-PROOF MARKET ENGINE
-@st.cache_data(ttl=600)
-def get_clean_data():
-    gold = yf.Ticker("GC=F")
-    # Get 1 year of history
-    hist = gold.history(period="1y")
-    
-    # Fix the 1.5 million bug: If price > 10,000, it's in cents. Divide by 100.
-    hist['Close'] = hist['Close'].apply(lambda x: x/100 if x > 10000 else x)
-    
-    # Conversion: USD * 0.3527 * 10 * 83.5 (Strict conversion)
-    hist['INR_Rate'] = hist['Close'] * 0.3527 * 10 * 83.5
-    return hist
-
-df_market = get_clean_data()
-live_rate = round(df_market['INR_Rate'].iloc[-1], 2)
-
-# 3. DATA LOAD
+# 2. DATA LOAD
 def load_data():
     try:
-        df = pd.read_csv("gold_tracker.csv")
-        df['Date'] = pd.to_datetime(df['Date'])
-        return df
-    except:
+        return pd.read_csv("gold_tracker.csv", parse_dates=["Date"])
+    except FileNotFoundError:
         return pd.DataFrame(columns=["Date", "Amount", "Entry_Rate", "Grams"])
 
-df_user = load_data()
+# 3. LIVE MARKET DATA (Adjusted for 2026 Indian 24k Gold)
+def get_live_rate():
+    try:
+        gold = yf.Ticker("GC=F")
+        data = gold.history(period="1d")
+        current_usd = data['Close'].iloc[-1]
+        # 2026 conversion: USD to INR * grams per oz * import duty/premium factor
+        return round(current_usd * 88.5 * 0.3527 * 1.15, 2)
+    except:
+        return 163800.0 # Fallback safety rate
 
-# 4. SIDEBAR
-st.sidebar.header("🕹️ CONTROL")
-amt = st.sidebar.number_input("Amount (₹)", min_value=0, value=263)
-if st.sidebar.button("📀 LOG"):
-    # Rounding to 6 decimal places to kill the "magic debt"
-    grams = round(amt / (live_rate / 10), 6)
-    new_row = pd.DataFrame([{"Date": datetime.now(), "Amount": amt, "Entry_Rate": live_rate, "Grams": grams}])
-    df_user = pd.concat([df_user, new_row], ignore_index=True)
-    df_user.to_csv("gold_tracker.csv", index=False)
+# 4. LOGIC ENGINE
+df = load_data()
+live_rate_10g = get_live_rate()
+
+# SIDEBAR: ENTRY SYSTEM
+st.sidebar.header("📥 LOG INVESTMENT")
+use_auto = st.sidebar.checkbox("Auto-detect Date & Time", value=True)
+if use_auto:
+    entry_date = datetime.now()
+else:
+    entry_date = st.sidebar.date_input("Manual Date Selection", datetime.now())
+
+inv_amount = st.sidebar.number_input("Amount (₹)", min_value=0, value=80)
+
+if st.sidebar.button("ADD TO BATTERY"):
+    # Subtract 3% GST immediately to get 'Net Investment'
+    net_val = inv_amount * 0.97
+    grams = net_val / (live_rate_10g / 10)
+    
+    new_entry = pd.DataFrame([{"Date": entry_date, "Amount": inv_amount, "Entry_Rate": live_rate_10g, "Grams": grams}])
+    df = pd.concat([df, new_entry], ignore_index=True)
+    df.to_csv("gold_tracker.csv", index=False)
+    st.sidebar.success("Logged to Gold Battery! 📀")
     st.rerun()
 
-if not df_user.empty and st.sidebar.button("🗑️ DELETE LAST"):
-    df_user = df_user[:-1]
-    df_user.to_csv("gold_tracker.csv", index=False)
-    st.rerun()
+# 5. DASHBOARD VISUALS
+st.title("📀 Gold Battery: Phase 1 Dashboard")
 
-# 5. DASHBOARD
-st.title("📀 Gold Battery Tracker")
+if not df.empty:
+    total_invested = df['Amount'].sum()
+    total_grams = df['Grams'].sum()
+    
+    # REAL-TIME CALCULATION
+    # What it's worth now (applying 3% sell spread because Jar doesn't sell at market buy price)
+    current_cash_value = (total_grams * (live_rate_10g / 10)) * 0.97
+    revenue = current_cash_value - total_invested
 
-if not df_user.empty:
-    total_inv = round(df_user['Amount'].sum(), 2)
-    total_grams = round(df_user['Grams'].sum(), 6)
-    # Current Value = Total Grams * (Current Price / 10)
-    current_val = round(total_grams * (live_rate / 10), 2)
-    revenue = round(current_val - total_inv, 2)
-
-    # REVENUE BOX
-    sym = "💰" if revenue >= -0.01 else "📈"
-    # Added a small buffer (>= -0.01) so 0.00 doesn't show as a loss due to tiny math errors
+    # THE BIG REVENUE BOX (Requirement #5)
+    sym = "💰💵💰" if revenue >= 0 else "📉💸📉"
     st.markdown(f"""
         <div class="revenue-box">
-            <div class="revenue-label">NET MARKET REVENUE</div>
+            <div class="revenue-label">TRADABLE REVENUE (PHASE 2 AMMO)</div>
             <div class="revenue-text">{sym} ₹{revenue:,.2f} {sym}</div>
         </div>
-        """, unsafe_allow_html=True)
+    """, unsafe_allow_html=True)
 
-    # THE GRAPH (Fixed with proper Market Data)
-    st.subheader("📊 Gold Trend & Your Entries")
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df_market.index, y=df_market['INR_Rate'], name="Market", line=dict(color='grey', width=1)))
-    fig.add_trace(go.Scatter(x=df_user['Date'], y=df_user['Entry_Rate'], mode='markers+lines', name="Your Buys", line=dict(color='gold', width=3), marker=dict(size=12, symbol='diamond')))
-    fig.update_layout(template="plotly_dark", height=500)
+    # Secondary Metrics
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Live Market Rate", f"₹{live_rate_10g:,}/10g")
+    m2.metric("Total Invested", f"₹{total_invested:,}")
+    m3.metric("Grams Accumulated", f"{total_grams:.4f}g")
+
+    # The Visual Graph (Requirement #2)
+    st.subheader("📈 Entry Rate History")
+    fig = px.area(df, x="Date", y="Entry_Rate", title="Market Price at each Buy", color_discrete_sequence=['gold'])
     st.plotly_chart(fig, use_container_width=True)
 
-    # STATS
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Live Price", f"₹{live_rate:,}")
-    c2.metric("Total Invested", f"₹{total_inv:,}")
-    c3.metric("Gold Weight", f"{total_grams}g")
+    # History Table (Requirement #4)
+    st.subheader("📅 Investment Log")
+    st.dataframe(df.sort_values(by="Date", ascending=False), use_container_width=True)
 else:
-    st.info(f"Log your entry. Current Market Price: ₹{live_rate}")
+    st.info("Battery is empty. Start logging to see your growth.")
