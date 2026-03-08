@@ -18,26 +18,24 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# 2. ENGINES (Fixed for Current Indian Rates)
+# 2. THE ERROR-PROOF MARKET ENGINE
 @st.cache_data(ttl=600)
-def get_market_master():
-    try:
-        gold = yf.Ticker("GC=F")
-        hist = gold.history(period="1y")
-        # Fixed Multiplier: USD/oz * 0.3527 (to g) * 10 (to 10g) * Exch Rate (approx 83.5)
-        # We removed the extra 1.15 premium that was causing the 185k error
-        hist['INR_Rate'] = hist['Close'] * 0.3527 * 10 * 83.5 
-        return hist
-    except:
-        return pd.DataFrame()
+def get_clean_data():
+    gold = yf.Ticker("GC=F")
+    # Get 1 year of history
+    hist = gold.history(period="1y")
+    
+    # Fix the 1.5 million bug: If price > 10,000, it's in cents. Divide by 100.
+    hist['Close'] = hist['Close'].apply(lambda x: x/100 if x > 10000 else x)
+    
+    # Conversion: USD * 0.3527 * 10 * 83.5 (Strict conversion)
+    hist['INR_Rate'] = hist['Close'] * 0.3527 * 10 * 83.5
+    return hist
 
-def get_live_price():
-    try:
-        data = yf.Ticker("GC=F").history(period="1d")
-        return round(data['Close'].iloc[-1] * 0.3527 * 10 * 83.5, 2)
-    except:
-        return 163800.0 # Fallback safety for March 2026
+df_market = get_clean_data()
+live_rate = round(df_market['INR_Rate'].iloc[-1], 2)
 
+# 3. DATA LOAD
 def load_data():
     try:
         df = pd.read_csv("gold_tracker.csv")
@@ -46,63 +44,56 @@ def load_data():
     except:
         return pd.DataFrame(columns=["Date", "Amount", "Entry_Rate", "Grams"])
 
-# 3. INITIALIZE
-df = load_data()
-live_rate = get_live_price()
-master_trend = get_market_master()
+df_user = load_data()
 
 # 4. SIDEBAR
-st.sidebar.header("🕹️ CONTROL PANEL")
-use_auto = st.sidebar.checkbox("Auto-detect Date/Time", value=True)
-entry_date = datetime.now() if use_auto else st.sidebar.date_input("Pick Date", datetime.now())
-inv_amt = st.sidebar.number_input("Amount (₹)", min_value=0, value=80)
-
-if st.sidebar.button("📀 LOG INVESTMENT"):
-    # CLEAN MATH: Raw Grams = Amount / (Price per 10g / 10)
-    grams_purchased = inv_amt / (live_rate / 10)
-    new_row = pd.DataFrame([{"Date": entry_date, "Amount": inv_amt, "Entry_Rate": live_rate, "Grams": grams_purchased}])
-    df = pd.concat([df, new_row], ignore_index=True)
-    df.to_csv("gold_tracker.csv", index=False)
+st.sidebar.header("🕹️ CONTROL")
+amt = st.sidebar.number_input("Amount (₹)", min_value=0, value=263)
+if st.sidebar.button("📀 LOG"):
+    # Rounding to 6 decimal places to kill the "magic debt"
+    grams = round(amt / (live_rate / 10), 6)
+    new_row = pd.DataFrame([{"Date": datetime.now(), "Amount": amt, "Entry_Rate": live_rate, "Grams": grams}])
+    df_user = pd.concat([df_user, new_row], ignore_index=True)
+    df_user.to_csv("gold_tracker.csv", index=False)
     st.rerun()
 
-if not df.empty:
-    st.sidebar.divider()
-    if st.sidebar.button("🗑️ DELETE LAST ENTRY"):
-        df = df[:-1]
-        df.to_csv("gold_tracker.csv", index=False)
-        st.rerun()
+if not df_user.empty and st.sidebar.button("🗑️ DELETE LAST"):
+    df_user = df_user[:-1]
+    df_user.to_csv("gold_tracker.csv", index=False)
+    st.rerun()
 
 # 5. DASHBOARD
-st.title("📀 Gold Battery Tracker (Pure Market)")
+st.title("📀 Gold Battery Tracker")
 
-if not df.empty:
-    total_inv = df['Amount'].sum()
-    total_grams = df['Grams'].sum()
-    # RAW REVENUE = (Grams * Current Price) - Total Invested
-    revenue = (total_grams * (live_rate / 10)) - total_inv
+if not df_user.empty:
+    total_inv = round(df_user['Amount'].sum(), 2)
+    total_grams = round(df_user['Grams'].sum(), 6)
+    # Current Value = Total Grams * (Current Price / 10)
+    current_val = round(total_grams * (live_rate / 10), 2)
+    revenue = round(current_val - total_inv, 2)
 
-    # THE BIG REVENUE BOX (No more forced negative start)
-    sym = "💰" if revenue >= 0 else "📈"
+    # REVENUE BOX
+    sym = "💰" if revenue >= -0.01 else "📈"
+    # Added a small buffer (>= -0.01) so 0.00 doesn't show as a loss due to tiny math errors
     st.markdown(f"""
         <div class="revenue-box">
-            <div class="revenue-label">PURE MARKET REVENUE</div>
+            <div class="revenue-label">NET MARKET REVENUE</div>
             <div class="revenue-text">{sym} ₹{revenue:,.2f} {sym}</div>
         </div>
         """, unsafe_allow_html=True)
 
-    # MASTER TREND GRAPH
-    if not master_trend.empty:
-        st.subheader("📊 Live Price vs. Your Entry")
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=master_trend.index, y=master_trend['INR_Rate'], name="Market Trend", line=dict(color='rgba(255, 255, 255, 0.2)', width=1)))
-        fig.add_trace(go.Scatter(x=df['Date'], y=df['Entry_Rate'], mode='markers+lines', name="Your Buys", line=dict(color='#FFD700', width=3), marker=dict(size=12, symbol='diamond')))
-        fig.update_layout(template="plotly_dark", height=500, hovermode="x unified")
-        st.plotly_chart(fig, use_container_width=True)
+    # THE GRAPH (Fixed with proper Market Data)
+    st.subheader("📊 Gold Trend & Your Entries")
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=df_market.index, y=df_market['INR_Rate'], name="Market", line=dict(color='grey', width=1)))
+    fig.add_trace(go.Scatter(x=df_user['Date'], y=df_user['Entry_Rate'], mode='markers+lines', name="Your Buys", line=dict(color='gold', width=3), marker=dict(size=12, symbol='diamond')))
+    fig.update_layout(template="plotly_dark", height=500)
+    st.plotly_chart(fig, use_container_width=True)
 
-    # METRICS
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Live Market Price", f"₹{live_rate:,}")
-    m2.metric("Total Investment", f"₹{total_inv:,}")
-    m3.metric("Gold Weight", f"{total_grams:.4f}g")
+    # STATS
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Live Price", f"₹{live_rate:,}")
+    c2.metric("Total Invested", f"₹{total_inv:,}")
+    c3.metric("Gold Weight", f"{total_grams}g")
 else:
-    st.info("Log your first entry. Current Live Price: ₹" + str(live_rate))
+    st.info(f"Log your entry. Current Market Price: ₹{live_rate}")
